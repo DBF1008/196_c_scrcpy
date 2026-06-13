@@ -19,20 +19,38 @@ public class DisplayPropertiesTracker {
         }
     }
 
+    private final Clock clock;
     private final List<PendingChange> pending = new ArrayList<>();
 
+    public DisplayPropertiesTracker() {
+        this(SystemClock::uptimeMillis);
+    }
+
+    /**
+     * Constructor with configurable clock (for testing).
+     *
+     * @param clock the clock to use for timestamp measurements
+     */
+    public DisplayPropertiesTracker(Clock clock) {
+        this.clock = clock;
+    }
+
     public synchronized void pushClientRequest(DisplayProperties props) {
-        long now = SystemClock.uptimeMillis();
+        long now = clock.uptimeMillis();
         pending.add(new PendingChange(props, now));
     }
 
     /**
      * Function to be called when the display properties changed.
      *
-     * @param props the new display properties
+     * @param props the new display properties (may be {@code null} if the display info is temporarily unavailable)
      * @return {@code true} if this change is the result of a client request
      */
     public synchronized boolean onChanged(DisplayProperties props) {
+        if (props == null) {
+            // Display info is unavailable (e.g. display being released); cannot match against pending requests
+            return false;
+        }
         cleanExpired();
         int index = getMatchingPendingIndex(props);
         if (index == -1) {
@@ -41,6 +59,16 @@ public class DisplayPropertiesTracker {
 
         pending.subList(0, index + 1).clear();
         return true;
+    }
+
+    /**
+     * Clear all pending client requests.
+     * <p>
+     * Should be called when the display changes externally (e.g. system rotation, display loss) to prevent stale
+     * pending entries from being incorrectly matched against future display property changes.
+     */
+    public synchronized void clear() {
+        pending.clear();
     }
 
     private int getMatchingPendingIndex(DisplayProperties props) {
@@ -53,7 +81,7 @@ public class DisplayPropertiesTracker {
     }
 
     private int getFirstNonExpiredIndex() {
-        long now = SystemClock.uptimeMillis();
+        long now = clock.uptimeMillis();
         for (int i = 0; i < pending.size(); ++i) {
             if (pending.get(i).timestamp + PENDING_CACHE_DURATION >= now) {
                 return i;

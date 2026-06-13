@@ -7,24 +7,41 @@ import android.os.SystemClock;
 
 public final class DisplayResizeDebouncer {
 
-    private static final long DEBOUNCE_DELAY_MS = 300;
+    private static final long DEFAULT_DEBOUNCE_DELAY_MS = 300;
 
     public interface Callback {
         void trigger(Size size);
     }
 
+    private final long debounceDelayMs;
+    private final Clock clock;
     private final Callback callback;
     private Size request;
     private long deadline;
 
+    private volatile boolean stopped;
     private Thread thread;
 
     public DisplayResizeDebouncer(Callback callback) {
+        this(DEFAULT_DEBOUNCE_DELAY_MS, SystemClock::uptimeMillis, callback);
+    }
+
+    /**
+     * Constructor with configurable delay and clock (for testing).
+     *
+     * @param debounceDelayMs the debounce delay in milliseconds
+     * @param clock           the clock to use for time measurements
+     * @param callback        the callback to invoke when the debounce period expires
+     */
+    public DisplayResizeDebouncer(long debounceDelayMs, Clock clock, Callback callback) {
+        this.debounceDelayMs = debounceDelayMs;
+        this.clock = clock;
         this.callback = callback;
     }
 
     public void start() {
         assert thread == null;
+        stopped = false;
         thread = new Thread(this::debounce);
         thread.setName("debouncer");
         thread.setDaemon(true);
@@ -32,10 +49,15 @@ public final class DisplayResizeDebouncer {
     }
 
     public void stop() {
+        stopped = true;
         if (thread != null) {
             thread.interrupt();
             thread = null;
         }
+    }
+
+    public boolean isStopped() {
+        return stopped;
     }
 
     private void debounce() {
@@ -44,7 +66,10 @@ public final class DisplayResizeDebouncer {
                 Size newSize;
                 synchronized (this) {
                     while (true) {
-                        long now = SystemClock.uptimeMillis();
+                        if (stopped) {
+                            return;
+                        }
+                        long now = clock.uptimeMillis();
                         if (request != null && now >= deadline) {
                             break;
                         }
@@ -70,8 +95,11 @@ public final class DisplayResizeDebouncer {
 
     public synchronized void requestResize(Size size) {
         assert size != null;
+        if (stopped) {
+            return;
+        }
         if (request == null) {
-            deadline = SystemClock.uptimeMillis() + DEBOUNCE_DELAY_MS;
+            deadline = clock.uptimeMillis() + debounceDelayMs;
         }
         request = size;
         notify();

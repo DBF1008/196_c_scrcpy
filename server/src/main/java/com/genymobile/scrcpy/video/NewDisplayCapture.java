@@ -62,6 +62,8 @@ public class NewDisplayCapture extends SurfaceCapture {
     private final boolean vdSystemDecorations;
     private final boolean flexDisplay;
 
+    private volatile boolean released;
+
     private VideoConstraints videoConstraints;
 
     private VirtualDisplay virtualDisplay;
@@ -244,13 +246,25 @@ public class NewDisplayCapture extends SurfaceCapture {
             displayMonitor.start(virtualDisplayId, (props) -> {
                 int reason;
                 if (flexDisplay) {
-                    boolean isClientResize = tracker.onChanged(props);
-                    if (isClientResize) {
-                        reason = CaptureControl.RESET_REASON_CLIENT_RESIZED;
-                    } else {
-                        reason = CaptureControl.RESET_REASON_DISPLAY_PROPERTIES_CHANGED;
-                        // Display properties have changed, cancel pending client resize requests
+                    if (props == null) {
+                        // Display info temporarily unavailable (e.g. display being reconfigured or released).
+                        // Cancel any pending client resize and clear stale tracker entries to prevent
+                        // them from being incorrectly matched when the display comes back.
                         debouncer.cancelResize();
+                        tracker.clear();
+                        reason = CaptureControl.RESET_REASON_DISPLAY_PROPERTIES_CHANGED;
+                    } else {
+                        boolean isClientResize = tracker.onChanged(props);
+                        if (isClientResize) {
+                            reason = CaptureControl.RESET_REASON_CLIENT_RESIZED;
+                        } else {
+                            reason = CaptureControl.RESET_REASON_DISPLAY_PROPERTIES_CHANGED;
+                            // Display properties changed externally (e.g. system rotation), cancel pending
+                            // client resize requests and clear stale tracker entries to prevent
+                            // mismatching future display events against obsolete pending entries.
+                            debouncer.cancelResize();
+                            tracker.clear();
+                        }
                     }
                 } else {
                     reason = CaptureControl.RESET_REASON_DISPLAY_PROPERTIES_CHANGED;
@@ -294,10 +308,15 @@ public class NewDisplayCapture extends SurfaceCapture {
 
     @Override
     public void release() {
+        released = true;
+
         displayMonitor.stopAndRelease();
 
         if (debouncer != null) {
             debouncer.stop();
+        }
+        if (tracker != null) {
+            tracker.clear();
         }
 
         if (virtualDisplay != null) {
@@ -307,6 +326,10 @@ public class NewDisplayCapture extends SurfaceCapture {
                 setCurrentVirtualDisplay(null);
             }
         }
+    }
+
+    public boolean isReleased() {
+        return released;
     }
 
     @Override
@@ -329,6 +352,10 @@ public class NewDisplayCapture extends SurfaceCapture {
     public void requestResize(int width, int height) {
         if (!flexDisplay) {
             throw new IllegalStateException("Cannot resize a non-flex display");
+        }
+        if (released) {
+            Ln.w("Cannot resize: display already released");
+            return;
         }
 
         VideoConstraints constraints = getVideoConstraints(); // synchronized
@@ -354,19 +381,30 @@ public class NewDisplayCapture extends SurfaceCapture {
     }
 
     private synchronized void triggerResize(Size size) {
-        if (virtualDisplay != null) {
-            size = size.constrain(videoConstraints); // in case the constraints have changed
-            int displayId = virtualDisplay.getDisplay().getDisplayId();
-            DisplayInfo displayInfo = ServiceManager.getDisplayManager().getDisplayInfo(displayId);
-            int displayRotation = displayInfo.getRotation();
-            if (captureOrientation.isSwap()) {
-                size = size.rotate();
-            }
-            tracker.pushClientRequest(new DisplayProperties(size, displayRotation));
-
-            // Although the display size (as detected by the DisplayMonitor) is rotated, the virtual display itself is not
-            Size vdSize = (displayRotation % 2) == 0 ? size : size.rotate();
-            virtualDisplay.resize(vdSize.getWidth(), vdSize.getHeight(), dpi);
+        if (released || virtualDisplay == null) {
+            Ln.d("Ignoring resize: display released or destroyed");
+            return;
         }
+
+        size = size.constrain(videoConstraints); // in case the constraints have changed
+        int displayId = virtualDisplay.getDisplay().getDisplayId();
+        DisplayInfo displayInfo = ServiceManager.getDisplayManager().getDisplayInfo(displayId);
+        if (displayInfo == null) {
+            Ln.w("DisplayInfo for " + displayId + " is unavailable, skipping resize");
+            // Display info is temporarily unavailable (e.g. during reconfiguration or release).
+            // Do not push to tracker — we cannot determine the current rotation, and a stale
+            // entry could be incorrectly matched when the display comes back.
+            return;
+        }
+
+        int displayRotation = displayInfo.getRotation();
+        if (captureOrientation.isSwap()) {
+            size = size.rotate();
+        }
+        tracker.pushClientRequest(new DisplayProperties(size, displayRotation));
+
+        // Although the display size (as detected by the DisplayMonitor) is rotated, the virtual display itself is not
+        Size vdSize = (displayRotation % 2) == 0 ? size : size.rotate();
+        virtualDisplay.resize(vdSize.getWidth(), vdSize.getHeight(), dpi);
     }
 }
