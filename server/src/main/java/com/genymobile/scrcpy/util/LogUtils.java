@@ -6,6 +6,7 @@ import com.genymobile.scrcpy.device.Device;
 import com.genymobile.scrcpy.display.DisplayInfo;
 import com.genymobile.scrcpy.model.Codec;
 import com.genymobile.scrcpy.model.DeviceApp;
+import com.genymobile.scrcpy.model.LaunchCandidate;
 import com.genymobile.scrcpy.model.Size;
 import com.genymobile.scrcpy.video.VideoCodec;
 import com.genymobile.scrcpy.wrappers.DisplayManager;
@@ -291,6 +292,56 @@ public final class LogUtils {
             } else {
                 builder.append("\n   ").append(String.format("%" + column + "s", " "));
             }
+            builder.append(" ").append(app.getPackageName());
+        }
+
+        return builder.toString();
+    }
+
+    /**
+     * Build a formatted report of launch candidates with match metadata.
+     *
+     * @param title      the report title
+     * @param candidates the sorted list of launch candidates
+     * @return a multi-line string suitable for logging
+     */
+    public static String buildCandidateReport(String title, List<LaunchCandidate> candidates) {
+        StringBuilder builder = new StringBuilder(title);
+
+        if (candidates.isEmpty()) {
+            builder.append("\n  (no candidates)");
+            return builder.toString();
+        }
+
+        final int nameColumn = 30;
+        final int typeColumn = 16;
+
+        for (int i = 0; i < candidates.size(); i++) {
+            LaunchCandidate candidate = candidates.get(i);
+            DeviceApp app = candidate.getApp();
+            String name = app.getName();
+
+            builder.append("\n  ").append(i + 1).append(". ");
+            if (app.isSystem()) {
+                builder.append("* ");
+            } else {
+                builder.append("- ");
+            }
+            builder.append(name);
+
+            int namePadding = nameColumn - name.length();
+            if (namePadding > 0) {
+                builder.append(String.format("%" + namePadding + "s", " "));
+            }
+
+            String matchLabel = candidate.getMatchType().getLabel();
+            builder.append(" [").append(matchLabel).append("]");
+
+            int typePadding = typeColumn - matchLabel.length() - 2;
+            if (typePadding > 0) {
+                builder.append(String.format("%" + typePadding + "s", " "));
+            }
+
             builder.append(" ").append(app.getPackageName());
         }
 

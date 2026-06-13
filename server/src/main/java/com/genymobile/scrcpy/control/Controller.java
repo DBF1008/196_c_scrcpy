@@ -4,9 +4,13 @@ import com.genymobile.scrcpy.AndroidVersions;
 import com.genymobile.scrcpy.AsyncProcessor;
 import com.genymobile.scrcpy.CleanUp;
 import com.genymobile.scrcpy.Options;
+import com.genymobile.scrcpy.device.AppResolver;
 import com.genymobile.scrcpy.device.Device;
+import com.genymobile.scrcpy.device.DeviceAppProvider;
 import com.genymobile.scrcpy.display.DisplayInfo;
+import com.genymobile.scrcpy.model.AppQuery;
 import com.genymobile.scrcpy.model.DeviceApp;
+import com.genymobile.scrcpy.model.LaunchPlan;
 import com.genymobile.scrcpy.model.Point;
 import com.genymobile.scrcpy.model.Position;
 import com.genymobile.scrcpy.model.Size;
@@ -766,47 +770,74 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         startAppExecutor.submit(() -> startApp(name));
     }
 
-    private void startApp(String name) {
-        boolean forceStopBeforeStart = name.startsWith("+");
-        if (forceStopBeforeStart) {
-            name = name.substring(1);
-        }
-
-        DeviceApp app;
-        boolean searchByName = name.startsWith("?");
-        if (searchByName) {
-            name = name.substring(1);
-
-            Ln.i("Processing Android apps... (this may take some time)");
-            List<DeviceApp> apps = Device.findByName(name);
-            if (apps.isEmpty()) {
-                Ln.w("No app found for name \"" + name + "\"");
-                return;
-            }
-
-            if (apps.size() > 1) {
-                String title = "No unique app found for name \"" + name + "\":";
-                Ln.w(LogUtils.buildAppListMessage(title, apps));
-                return;
-            }
-
-            app = apps.get(0);
-        } else {
-            app = Device.findByPackageName(name);
-            if (app == null) {
-                Ln.w("No app found for package \"" + name + "\"");
-                return;
-            }
-        }
-
-        int startAppDisplayId = getStartAppDisplayId();
-        if (startAppDisplayId == Device.DISPLAY_ID_NONE) {
-            Ln.e("No known display id to start app \"" + name + "\"");
+    private void startApp(String rawQuery) {
+        AppQuery query;
+        try {
+            query = AppQuery.parse(rawQuery);
+        } catch (IllegalArgumentException e) {
+            Ln.e("Invalid app query: " + e.getMessage());
             return;
         }
 
-        Ln.i("Starting app \"" + app.getName() + "\" [" + app.getPackageName() + "] on display " + startAppDisplayId + "...");
-        Device.startApp(app.getPackageName(), startAppDisplayId, forceStopBeforeStart);
+        if (query.isNameSearch()) {
+            Ln.i("Processing Android apps... (this may take some time)");
+        }
+
+        AppResolver resolver = new AppResolver(new DeviceAppProvider());
+
+        // Resolve display target: query-specified > controller's current display > wait for virtual display
+        int fallbackDisplayId = getStartAppDisplayId();
+        LaunchPlan plan = resolver.resolve(query, fallbackDisplayId);
+
+        // --new-display scenario: if no display resolved and we have candidates, try waiting longer
+        if (plan.getTargetDisplayId() == Device.DISPLAY_ID_NONE && plan.hasAnyMatch()) {
+            try {
+                DisplayData data = waitDisplayData(3000);
+                if (data != null) {
+                    int virtualDisplayId = data.virtualDisplayId;
+                    plan = new LaunchPlan(plan.getSelected(), plan.getAllCandidates(),
+                            virtualDisplayId, plan.isForceStop(), plan.isDryRun(), plan.getDiagnosticMessage());
+                    Ln.i("Virtual display became available: id=" + virtualDisplayId);
+                }
+            } catch (InterruptedException e) {
+                // interrupted, continue with no display
+            }
+        }
+
+        // Dry-run: report and return
+        if (query.isDryRun()) {
+            Ln.i(plan.formatReport());
+            if (plan.hasAnyMatch() && plan.getAllCandidates().size() > 1) {
+                String title = "Dry-run candidates for \"" + query.getTarget() + "\":";
+                Ln.i(LogUtils.buildCandidateReport(title, plan.getAllCandidates()));
+            }
+            return;
+        }
+
+        // No match
+        if (!plan.hasAnyMatch()) {
+            Ln.w(plan.getDiagnosticMessage());
+            return;
+        }
+
+        // No display available
+        if (plan.getTargetDisplayId() == Device.DISPLAY_ID_NONE) {
+            Ln.e("No known display id to start app \"" + query.getTarget() + "\"");
+            return;
+        }
+
+        // Multiple candidates in non-dry-run mode: log all, use best match
+        if (plan.getAllCandidates().size() > 1) {
+            String title = "Multiple apps matched for \"" + query.getTarget() + "\", selecting best:";
+            Ln.i(LogUtils.buildCandidateReport(title, plan.getAllCandidates()));
+        }
+
+        // Execute launch
+        DeviceApp app = plan.getSelected().getApp();
+        Ln.i("Starting app \"" + app.getName() + "\" [" + app.getPackageName()
+                + "] on display " + plan.getTargetDisplayId()
+                + (query.isForceStop() ? " (force-stop)" : "") + "...");
+        Device.startApp(app.getPackageName(), plan.getTargetDisplayId(), query.isForceStop());
     }
 
     private int getStartAppDisplayId() {
