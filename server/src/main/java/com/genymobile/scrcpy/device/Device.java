@@ -106,33 +106,14 @@ public final class Device {
     }
 
     public static String getClipboardText() {
-        ClipboardManager clipboardManager = ServiceManager.getClipboardManager();
-        if (clipboardManager == null) {
-            return null;
-        }
-        CharSequence s = clipboardManager.getText();
-        if (s == null) {
-            return null;
-        }
-        return s.toString();
+        // ClipboardManager.getText() tolerates a null manager (some devices have no clipboard manager)
+        return ClipboardManager.getText(ServiceManager.getClipboardManager());
     }
 
     public static boolean setClipboardText(String text) {
-        ClipboardManager clipboardManager = ServiceManager.getClipboardManager();
-        if (clipboardManager == null) {
-            return false;
-        }
-
-        String currentClipboard = getClipboardText();
-        if (currentClipboard != null && currentClipboard.equals(text)) {
-            // The clipboard already contains the requested text.
-            // Since pasting text from the computer involves setting the device clipboard, it could be set twice on a copy-paste. This would cause
-            // the clipboard listeners to be notified twice, and that would flood the Android keyboard clipboard history. To workaround this
-            // problem, do not explicitly set the clipboard text if it already contains the expected content.
-            return false;
-        }
-
-        return clipboardManager.setText(text);
+        // ClipboardManager forms the clipboard transaction boundary: it deduplicates redundant writes and suppresses the resulting "primary clip
+        // changed" self-notification (see ClipboardManager.setText()). It also tolerates a null manager (some devices have no clipboard manager).
+        return ClipboardManager.setText(ServiceManager.getClipboardManager(), text);
     }
 
     public static boolean setDisplayPower(int displayId, boolean on) {

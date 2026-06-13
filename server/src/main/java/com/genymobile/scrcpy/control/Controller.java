@@ -37,7 +37,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 public class Controller implements AsyncProcessor, VirtualDisplayListener {
@@ -95,8 +94,6 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
 
     private final KeyCharacterMap charMap = KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD);
 
-    private final AtomicBoolean isSettingClipboard = new AtomicBoolean();
-
     private final AtomicReference<DisplayData> displayData = new AtomicReference<>();
     private final Object displayDataAvailable = new Object(); // condition variable
 
@@ -144,16 +141,11 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         if (clipboardAutosync) {
             // If control and autosync are enabled, synchronize Android clipboard to the computer automatically
             if (clipboardManager != null) {
-                clipboardManager.addPrimaryClipChangedListener(() -> {
-                    if (isSettingClipboard.get()) {
-                        // This is a notification for the change we are currently applying, ignore it
-                        return;
-                    }
-                    String text = Device.getClipboardText();
-                    if (text != null) {
-                        DeviceMessage msg = DeviceMessage.createClipboard(text);
-                        sender.send(msg);
-                    }
+                // ClipboardManager filters out the "primary clip changed" notifications caused by our own setClipboard() calls (even when the
+                // device delivers them asynchronously), so this listener is only invoked for genuine device-side clipboard changes.
+                clipboardManager.setClipboardListener(text -> {
+                    DeviceMessage msg = DeviceMessage.createClipboard(text);
+                    sender.send(msg);
                 });
             } else {
                 Ln.w("No clipboard manager, copy-paste between device and computer will not work");
@@ -700,9 +692,9 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
     }
 
     private boolean setClipboard(String text, boolean paste, long sequence) {
-        isSettingClipboard.set(true);
+        // ClipboardManager arms the deduplication before setPrimaryClip() returns and recognizes the resulting clip-changed callback whenever it
+        // arrives, so no fragile "currently setting" time window is needed here: the self-notification is suppressed regardless of timing.
         boolean ok = Device.setClipboardText(text);
-        isSettingClipboard.set(false);
         if (ok) {
             Ln.i("Device clipboard set");
         }
@@ -713,7 +705,7 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         }
 
         if (sequence != ControlMessage.SEQUENCE_INVALID) {
-            // Acknowledgement requested
+            // Acknowledge the request whether or not the content actually changed, so the client's pending sequence is always released.
             DeviceMessage msg = DeviceMessage.createAckClipboard(sequence);
             sender.send(msg);
         }
