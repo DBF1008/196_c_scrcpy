@@ -6,6 +6,7 @@ import com.genymobile.scrcpy.device.Device;
 import com.genymobile.scrcpy.display.DisplayInfo;
 import com.genymobile.scrcpy.model.Codec;
 import com.genymobile.scrcpy.model.DeviceApp;
+import com.genymobile.scrcpy.model.LaunchPlan;
 import com.genymobile.scrcpy.model.Size;
 import com.genymobile.scrcpy.video.VideoCodec;
 import com.genymobile.scrcpy.wrappers.DisplayManager;
@@ -27,7 +28,6 @@ import android.util.Range;
 import java.text.DecimalFormat;
 import java.util.Collections;
 import java.util.List;
-import java.util.Objects;
 import java.util.SortedSet;
 import java.util.TreeSet;
 
@@ -254,25 +254,8 @@ public final class LogUtils {
     public static String buildAppListMessage(String title, List<DeviceApp> apps) {
         StringBuilder builder = new StringBuilder(title);
 
-        // Sort by:
-        //  1. system flag (system apps are before non-system apps)
-        //  2. name
-        //  3. package name
-        // Comparator.comparing() was introduced in API 24, so it cannot be used here to simplify the code
-        Collections.sort(apps, (thisApp, otherApp) -> {
-            // System apps first
-            int cmp = -Boolean.compare(thisApp.isSystem(), otherApp.isSystem());
-            if (cmp != 0) {
-                return cmp;
-            }
-
-            cmp = Objects.compare(thisApp.getName(), otherApp.getName(), String::compareTo);
-            if (cmp != 0) {
-                return cmp;
-            }
-
-            return Objects.compare(thisApp.getPackageName(), otherApp.getPackageName(), String::compareTo);
-        });
+        // Stable canonical ordering shared with the launch resolver (system apps first, then name, then package).
+        Collections.sort(apps, DeviceApp.SORT_COMPARATOR);
 
         final int column = 30;
         for (DeviceApp app : apps) {
@@ -294,6 +277,24 @@ public final class LogUtils {
             builder.append(" ").append(app.getPackageName());
         }
 
+        return builder.toString();
+    }
+
+    public static String buildLaunchPlanMessage(LaunchPlan plan) {
+        DeviceApp app = plan.getApp();
+        StringBuilder builder = new StringBuilder("Launch plan");
+        if (plan.isDryRun()) {
+            builder.append(" (dry-run)");
+        }
+        builder.append(":");
+        builder.append("\n    app:        ").append(app.getName()).append(" [").append(app.getPackageName()).append("]");
+        builder.append("\n    display-id: ");
+        if (plan.getDisplayId() == Device.DISPLAY_ID_NONE) {
+            builder.append("(unavailable)");
+        } else {
+            builder.append(plan.getDisplayId());
+        }
+        builder.append("\n    force-stop: ").append(plan.isForceStop() ? "yes" : "no");
         return builder.toString();
     }
 }

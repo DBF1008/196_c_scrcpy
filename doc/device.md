@@ -193,3 +193,27 @@ The `+` and `?` prefixes can be combined (in that order):
 ```bash
 scrcpy --start-app=+?firefox
 ```
+
+By default, `?` matches any app whose name *starts with* the given value. To match the
+app name *exactly* (case-insensitive), use the `?=` prefix:
+
+```bash
+scrcpy --start-app=?=Firefox
+```
+
+When `?` matches several apps but exactly one of them has that exact name, that app is
+selected automatically.
+
+To preview which app and display would be used, without actually starting anything, add
+a `!` prefix (dry-run):
+
+```bash
+scrcpy --start-app=!org.mozilla.firefox
+```
+
+All prefixes can be combined: `+` and `!` may appear in any order, and the optional
+`?`/`?=` name selector comes last:
+
+```bash
+scrcpy --start-app=+!?=Firefox
+```

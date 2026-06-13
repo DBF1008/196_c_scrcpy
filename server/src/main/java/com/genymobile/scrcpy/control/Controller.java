@@ -7,6 +7,8 @@ import com.genymobile.scrcpy.Options;
 import com.genymobile.scrcpy.device.Device;
 import com.genymobile.scrcpy.display.DisplayInfo;
 import com.genymobile.scrcpy.model.DeviceApp;
+import com.genymobile.scrcpy.model.LaunchPlan;
+import com.genymobile.scrcpy.model.LaunchQuery;
 import com.genymobile.scrcpy.model.Point;
 import com.genymobile.scrcpy.model.Position;
 import com.genymobile.scrcpy.model.Size;
@@ -766,47 +768,72 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         startAppExecutor.submit(() -> startApp(name));
     }
 
-    private void startApp(String name) {
-        boolean forceStopBeforeStart = name.startsWith("+");
-        if (forceStopBeforeStart) {
-            name = name.substring(1);
-        }
+    private void startApp(String text) {
+        LaunchQuery query = LaunchQuery.parse(text);
 
-        DeviceApp app;
-        boolean searchByName = name.startsWith("?");
-        if (searchByName) {
-            name = name.substring(1);
-
+        if (query.getMatchMode() != LaunchQuery.MatchMode.PACKAGE) {
+            // Listing app names (required for name matching) may take a lot of time
             Ln.i("Processing Android apps... (this may take some time)");
-            List<DeviceApp> apps = Device.findByName(name);
-            if (apps.isEmpty()) {
-                Ln.w("No app found for name \"" + name + "\"");
-                return;
-            }
-
-            if (apps.size() > 1) {
-                String title = "No unique app found for name \"" + name + "\":";
-                Ln.w(LogUtils.buildAppListMessage(title, apps));
-                return;
-            }
-
-            app = apps.get(0);
-        } else {
-            app = Device.findByPackageName(name);
-            if (app == null) {
-                Ln.w("No app found for package \"" + name + "\"");
-                return;
-            }
         }
 
-        int startAppDisplayId = getStartAppDisplayId();
-        if (startAppDisplayId == Device.DISPLAY_ID_NONE) {
-            Ln.e("No known display id to start app \"" + name + "\"");
+        AppLaunchResolver.AppRepository repository = new AppLaunchResolver.AppRepository() {
+            @Override
+            public DeviceApp findByPackageName(String packageName) {
+                return Device.findByPackageName(packageName);
+            }
+
+            @Override
+            public List<DeviceApp> listLaunchableApps() {
+                return Device.listApps();
+            }
+        };
+
+        // getStartAppDisplayId() waits for (and falls back from) the --new-display virtual display target.
+        LaunchResolution resolution = AppLaunchResolver.resolve(query, repository, this::getStartAppDisplayId);
+
+        switch (resolution.getStatus()) {
+            case NOT_FOUND:
+                logAppNotFound(query);
+                break;
+            case AMBIGUOUS:
+                logAmbiguousApps(query, resolution.getCandidates());
+                break;
+            case NO_DISPLAY:
+                Ln.e("No known display id to start app \"" + query.getTerm() + "\"");
+                break;
+            case RESOLVED:
+            default:
+                executeLaunchPlan(resolution.getPlan());
+                break;
+        }
+    }
+
+    private static void logAppNotFound(LaunchQuery query) {
+        if (query.getMatchMode() == LaunchQuery.MatchMode.PACKAGE) {
+            Ln.w("No app found for package \"" + query.getTerm() + "\"");
+        } else {
+            Ln.w("No app found for name \"" + query.getTerm() + "\"");
+        }
+    }
+
+    private static void logAmbiguousApps(LaunchQuery query, List<DeviceApp> candidates) {
+        String title;
+        if (query.getMatchMode() == LaunchQuery.MatchMode.NAME_EXACT) {
+            title = "Multiple apps found for name \"" + query.getTerm() + "\":";
+        } else {
+            title = "No unique app found for name \"" + query.getTerm() + "\":";
+        }
+        Ln.w(LogUtils.buildAppListMessage(title, candidates));
+    }
+
+    private static void executeLaunchPlan(LaunchPlan plan) {
+        DeviceApp app = plan.getApp();
+        if (plan.isDryRun()) {
+            Ln.i(LogUtils.buildLaunchPlanMessage(plan));
             return;
         }
-
-        Ln.i("Starting app \"" + app.getName() + "\" [" + app.getPackageName() + "] on display " + startAppDisplayId + "...");
-        Device.startApp(app.getPackageName(), startAppDisplayId, forceStopBeforeStart);
+        Ln.i("Starting app \"" + app.getName() + "\" [" + app.getPackageName() + "] on display " + plan.getDisplayId() + "...");
+        Device.startApp(app.getPackageName(), plan.getDisplayId(), plan.isForceStop());
     }
 
     private int getStartAppDisplayId() {
