@@ -155,9 +155,16 @@ public class NewDisplayCapture extends SurfaceCapture {
             displayMonitor.setSessionDisplayProperties(new DisplayProperties(displaySize, displayRotation));
         } else {
             DisplayInfo displayInfo = ServiceManager.getDisplayManager().getDisplayInfo(virtualDisplay.getDisplay().getDisplayId());
-            dpi = displayInfo.getDpi();
-            displayRotation = displayInfo.getRotation();
-            displaySize = displayInfo.getSize();
+            if (displayInfo != null) {
+                dpi = displayInfo.getDpi();
+                displayRotation = displayInfo.getRotation();
+                displaySize = displayInfo.getSize();
+            } else {
+                // The display info may be momentarily unreadable (e.g. while the display is being reconfigured or released). Keep the last
+                // known size and dpi to avoid an NPE; the next DisplayMonitor event will reset the capture with the correct values.
+                Ln.w("DisplayInfo for the virtual display cannot be retrieved, keeping last known size/dpi");
+                displayRotation = 0;
+            }
             if (flexDisplay) {
                 displaySize = displaySize.constrain(videoConstraints, false);
             } else {
@@ -353,20 +360,32 @@ public class NewDisplayCapture extends SurfaceCapture {
         this.videoConstraints = videoConstraints;
     }
 
-    private synchronized void triggerResize(Size size) {
-        if (virtualDisplay != null) {
-            size = size.constrain(videoConstraints); // in case the constraints have changed
-            int displayId = virtualDisplay.getDisplay().getDisplayId();
-            DisplayInfo displayInfo = ServiceManager.getDisplayManager().getDisplayInfo(displayId);
-            int displayRotation = displayInfo.getRotation();
-            if (captureOrientation.isSwap()) {
-                size = size.rotate();
-            }
-            tracker.pushClientRequest(new DisplayProperties(size, displayRotation));
-
-            // Although the display size (as detected by the DisplayMonitor) is rotated, the virtual display itself is not
-            Size vdSize = (displayRotation % 2) == 0 ? size : size.rotate();
-            virtualDisplay.resize(vdSize.getWidth(), vdSize.getHeight(), dpi);
+    private synchronized void triggerResize(Size size, long generation) {
+        if (virtualDisplay == null) {
+            return;
         }
+        if (!debouncer.isCurrentGeneration(generation)) {
+            // The resize has been superseded by a newer request, cancelled by a system display change, or the debouncer has been stopped
+            return;
+        }
+
+        int displayId = virtualDisplay.getDisplay().getDisplayId();
+        DisplayInfo displayInfo = ServiceManager.getDisplayManager().getDisplayInfo(displayId);
+        if (displayInfo == null) {
+            // The display info may be momentarily unreadable (e.g. while the display is being reconfigured or released); skip this resize
+            Ln.w("DisplayInfo for " + displayId + " cannot be retrieved, ignoring resize request");
+            return;
+        }
+
+        size = size.constrain(videoConstraints); // in case the constraints have changed
+        int displayRotation = displayInfo.getRotation();
+        if (captureOrientation.isSwap()) {
+            size = size.rotate();
+        }
+        tracker.pushClientRequest(new DisplayProperties(size, displayRotation));
+
+        // Although the display size (as detected by the DisplayMonitor) is rotated, the virtual display itself is not
+        Size vdSize = (displayRotation % 2) == 0 ? size : size.rotate();
+        virtualDisplay.resize(vdSize.getWidth(), vdSize.getHeight(), dpi);
     }
 }

@@ -4,6 +4,7 @@ import android.os.SystemClock;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.LongSupplier;
 
 public class DisplayPropertiesTracker {
 
@@ -21,18 +22,36 @@ public class DisplayPropertiesTracker {
 
     private final List<PendingChange> pending = new ArrayList<>();
 
+    private final LongSupplier clock;
+
+    public DisplayPropertiesTracker() {
+        this(SystemClock::uptimeMillis);
+    }
+
+    // Visible for testing (inject a controllable clock)
+    DisplayPropertiesTracker(LongSupplier clock) {
+        this.clock = clock;
+    }
+
     public synchronized void pushClientRequest(DisplayProperties props) {
-        long now = SystemClock.uptimeMillis();
+        long now = clock.getAsLong();
         pending.add(new PendingChange(props, now));
     }
 
     /**
      * Function to be called when the display properties changed.
      *
-     * @param props the new display properties
+     * @param props the new display properties, or {@code null} if the display is (temporarily) gone
      * @return {@code true} if this change is the result of a client request
      */
     public synchronized boolean onChanged(DisplayProperties props) {
+        if (props == null) {
+            // The display is gone: any pending client request can never be fulfilled by this display incarnation, so drop them to avoid
+            // matching a later (possibly unrelated) change once the display comes back.
+            pending.clear();
+            return false;
+        }
+
         cleanExpired();
         int index = getMatchingPendingIndex(props);
         if (index == -1) {
@@ -53,7 +72,7 @@ public class DisplayPropertiesTracker {
     }
 
     private int getFirstNonExpiredIndex() {
-        long now = SystemClock.uptimeMillis();
+        long now = clock.getAsLong();
         for (int i = 0; i < pending.size(); ++i) {
             if (pending.get(i).timestamp + PENDING_CACHE_DURATION >= now) {
                 return i;
