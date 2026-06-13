@@ -11,7 +11,6 @@ import com.genymobile.scrcpy.opengl.OpenGLRunner;
 import com.genymobile.scrcpy.util.AffineMatrix;
 import com.genymobile.scrcpy.util.HandlerExecutor;
 import com.genymobile.scrcpy.util.Ln;
-import com.genymobile.scrcpy.util.LogUtils;
 import com.genymobile.scrcpy.wrappers.ServiceManager;
 
 import android.annotation.SuppressLint;
@@ -19,31 +18,24 @@ import android.annotation.TargetApi;
 import android.graphics.Rect;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraCaptureSession;
-import android.hardware.camera2.CameraCharacteristics;
 import android.hardware.camera2.CameraConstrainedHighSpeedCaptureSession;
 import android.hardware.camera2.CameraDevice;
-import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CaptureFailure;
 import android.hardware.camera2.CaptureRequest;
 import android.hardware.camera2.params.OutputConfiguration;
 import android.hardware.camera2.params.SessionConfiguration;
-import android.hardware.camera2.params.StreamConfigurationMap;
-import android.media.MediaCodec;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.util.Range;
 import android.view.Surface;
 
 import java.io.IOException;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.stream.Stream;
 
 public class CameraCapture extends SurfaceCapture {
 
@@ -69,6 +61,11 @@ public class CameraCapture extends SurfaceCapture {
     private float zoom;
 
     private VideoConstraints videoConstraints;
+
+    // The negotiated capture plan and the capabilities of the camera it selected, computed in init().
+    private CameraPlanRequest planRequest;
+    private CameraCapabilities chosenCapabilities;
+    private CameraPlan plan;
 
     private String cameraId;
     private Size captureSize;
@@ -114,14 +111,34 @@ public class CameraCapture extends SurfaceCapture {
         cameraHandler = new Handler(cameraThread.getLooper());
         cameraExecutor = new HandlerExecutor(cameraHandler);
 
+        planRequest = CameraPlanRequest.builder()
+                .explicitCameraId(explicitCameraId)
+                .facing(cameraFacing)
+                .explicitSize(explicitSize)
+                .aspectRatio(aspectRatio)
+                .maxSize(videoConstraints.getMaxSize())
+                .fps(fps)
+                .highSpeed(highSpeed)
+                .zoom(zoom)
+                .torch(initialTorch)
+                .build();
+
         try {
-            cameraId = selectCamera(explicitCameraId, cameraFacing);
-            if (cameraId == null) {
-                throw new ConfigurationException("No matching camera found");
-            }
+            // Negotiate a consistent plan up front (camera + size + zoom + torch) before opening the camera,
+            // so incompatible combinations fail fast with a structured reason instead of late or silently.
+            List<CameraCapabilities> capabilities = CameraProbe.probeAll(ServiceManager.getCameraManager());
+            plan = CameraCapturePlanner.plan(capabilities, planRequest);
+            chosenCapabilities = findCapabilities(capabilities, plan.getCameraId());
+            logPlan(plan);
+
+            cameraId = plan.getCameraId();
+            zoom = plan.getZoom();
 
             Ln.i("Using camera '" + cameraId + "'");
             cameraDevice = openCamera(cameraId);
+        } catch (CameraPlanException e) {
+            Ln.e("No viable camera capture plan (" + e.getReason() + "): " + e.getMessage());
+            throw e;
         } catch (CameraAccessException | InterruptedException e) {
             throw new IOException(e);
         }
@@ -129,14 +146,12 @@ public class CameraCapture extends SurfaceCapture {
 
     @Override
     public void prepare() throws IOException {
-        try {
-            int maxSize = videoConstraints.getMaxSize();
-            captureSize = selectSize(cameraId, explicitSize, maxSize, aspectRatio, highSpeed);
-            if (captureSize == null) {
-                throw new IOException("Could not select camera size");
-            }
-        } catch (CameraAccessException e) {
-            throw new IOException(e);
+        // Re-fit the resolution on the already-selected camera for the current max size (the camera choice
+        // itself is fixed at init and not re-evaluated here).
+        CameraPlanRequest request = planRequest.withMaxSize(videoConstraints.getMaxSize());
+        captureSize = CameraCapturePlanner.selectSize(chosenCapabilities, request);
+        if (captureSize == null) {
+            throw new IOException("Could not select camera size");
         }
 
         VideoFilter filter = new VideoFilter(captureSize);
@@ -155,115 +170,20 @@ public class CameraCapture extends SurfaceCapture {
         videoSize = filter.getOutputSize().constrain(videoConstraints);
     }
 
-    private static String selectCamera(String explicitCameraId, CameraFacing cameraFacing) throws CameraAccessException, ConfigurationException {
-        CameraManager cameraManager = ServiceManager.getCameraManager();
-
-        String[] cameraIds = cameraManager.getCameraIdList();
-        if (explicitCameraId != null) {
-            if (!Arrays.asList(cameraIds).contains(explicitCameraId)) {
-                Ln.e("Camera with id " + explicitCameraId + " not found\n" + LogUtils.buildCameraListMessage(false));
-                throw new ConfigurationException("Camera id not found");
-            }
-            return explicitCameraId;
+    private static void logPlan(CameraPlan plan) {
+        Ln.i("Camera capture plan: " + plan.getSummary());
+        for (CameraPlanAdjustment adjustment : plan.getAdjustments()) {
+            Ln.w("Camera capture adjustment - " + adjustment);
         }
-
-        if (cameraFacing == null) {
-            // Use the first one
-            return cameraIds.length > 0 ? cameraIds[0] : null;
-        }
-
-        for (String cameraId : cameraIds) {
-            CameraCharacteristics characteristics = cameraManager.getCameraCharacteristics(cameraId);
-
-            int facing = characteristics.get(CameraCharacteristics.LENS_FACING);
-            if (cameraFacing.value() == facing) {
-                return cameraId;
-            }
-        }
-
-        // Not found
-        return null;
     }
 
-    @TargetApi(AndroidVersions.API_24_ANDROID_7_0)
-    private static Size selectSize(String cameraId, Size explicitSize, int maxSize, CameraAspectRatio aspectRatio, boolean highSpeed)
-            throws CameraAccessException {
-        if (explicitSize != null) {
-            return explicitSize;
-        }
-
-        CameraManager cameraManager = ServiceManager.getCameraManager();
-        CameraCharacteristics characteristics = cameraManager.getCameraCharacteristics(cameraId);
-
-        StreamConfigurationMap configs = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
-        android.util.Size[] sizes = highSpeed ? configs.getHighSpeedVideoSizes() : configs.getOutputSizes(MediaCodec.class);
-        if (sizes == null) {
-            return null;
-        }
-
-        Stream<android.util.Size> stream = Arrays.stream(sizes);
-        if (maxSize > 0) {
-            stream = stream.filter(it -> it.getWidth() <= maxSize && it.getHeight() <= maxSize);
-        }
-
-        Float targetAspectRatio = resolveAspectRatio(aspectRatio, characteristics);
-        if (targetAspectRatio != null) {
-            stream = stream.filter(it -> {
-                float ar = ((float) it.getWidth() / it.getHeight());
-                float arRatio = ar / targetAspectRatio;
-                // Accept if the aspect ratio is the target aspect ratio + or - 10%
-                return arRatio >= 0.9f && arRatio <= 1.1f;
-            });
-        }
-
-        Optional<android.util.Size> selected = stream.max((s1, s2) -> {
-            // Greater width is better
-            int cmp = Integer.compare(s1.getWidth(), s2.getWidth());
-            if (cmp != 0) {
-                return cmp;
+    private static CameraCapabilities findCapabilities(List<CameraCapabilities> capabilities, String id) {
+        for (CameraCapabilities capability : capabilities) {
+            if (id.equals(capability.getId())) {
+                return capability;
             }
-
-            if (targetAspectRatio != null) {
-                // Closer to the target aspect ratio is better
-                float ar1 = ((float) s1.getWidth() / s1.getHeight());
-                float arRatio1 = ar1 / targetAspectRatio;
-                float distance1 = Math.abs(1 - arRatio1);
-
-                float ar2 = ((float) s2.getWidth() / s2.getHeight());
-                float arRatio2 = ar2 / targetAspectRatio;
-                float distance2 = Math.abs(1 - arRatio2);
-
-                // Reverse the order because lower distance is better
-                cmp = Float.compare(distance2, distance1);
-                if (cmp != 0) {
-                    return cmp;
-                }
-            }
-
-            // Greater height is better
-            return Integer.compare(s1.getHeight(), s2.getHeight());
-        });
-
-        if (selected.isPresent()) {
-            android.util.Size size = selected.get();
-            return new Size(size.getWidth(), size.getHeight());
         }
-
-        // Not found
         return null;
-    }
-
-    private static Float resolveAspectRatio(CameraAspectRatio ratio, CameraCharacteristics characteristics) {
-        if (ratio == null) {
-            return null;
-        }
-
-        if (ratio.isSensor()) {
-            Rect activeSize = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
-            return (float) activeSize.width() / activeSize.height();
-        }
-
-        return ratio.getAspectRatio();
     }
 
     @TargetApi(AndroidVersions.API_30_ANDROID_11)
@@ -296,12 +216,9 @@ public class CameraCapture extends SurfaceCapture {
                     return;
                 }
 
-                CameraManager cameraManager = ServiceManager.getCameraManager();
-                try {
-                    CameraCharacteristics characteristics = cameraManager.getCameraCharacteristics(cameraId);
-                    zoomRange = characteristics.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE);
-                } catch (CameraAccessException e) {
-                    Ln.w("Could not get camera characteristics");
+                // The zoom range was already obtained while probing capabilities, so no extra query is needed here.
+                if (chosenCapabilities != null && chosenCapabilities.isZoomSupported()) {
+                    zoomRange = new Range<>(chosenCapabilities.getZoomMin(), chosenCapabilities.getZoomMax());
                 }
 
                 try {
@@ -311,12 +228,11 @@ public class CameraCapture extends SurfaceCapture {
                     if (fps > 0) {
                         requestBuilder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, new Range<>(fps, fps));
                     }
-                    if (initialTorch) {
+                    if (plan.isTorch()) {
                         Ln.i("Turn camera torch on");
                         requestBuilder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_TORCH);
                     }
                     if (zoom != 1) {
-                        zoom = clampZoom(zoom);
                         Ln.i("Set camera zoom: " + zoom);
                         requestBuilder.set(CaptureRequest.CONTROL_ZOOM_RATIO, zoom);
                     }
