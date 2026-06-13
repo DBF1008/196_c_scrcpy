@@ -12,6 +12,8 @@ import com.genymobile.scrcpy.control.Controller;
 import com.genymobile.scrcpy.device.DesktopConnection;
 import com.genymobile.scrcpy.device.Device;
 import com.genymobile.scrcpy.device.Streamer;
+import com.genymobile.scrcpy.list.ListData;
+import com.genymobile.scrcpy.list.ListJson;
 import com.genymobile.scrcpy.model.ConfigurationException;
 import com.genymobile.scrcpy.model.NewDisplay;
 import com.genymobile.scrcpy.opengl.OpenGLRunner;
@@ -25,6 +27,7 @@ import com.genymobile.scrcpy.video.SurfaceEncoder;
 import com.genymobile.scrcpy.video.VideoSource;
 
 import android.annotation.SuppressLint;
+import android.hardware.camera2.CameraAccessException;
 import android.os.Build;
 import android.os.Looper;
 import android.system.Os;
@@ -242,6 +245,12 @@ public final class Server {
         Ln.disableSystemStreams();
         Ln.initLogLevel(options.getLogLevel());
 
+        // In JSON list mode, the standard output must contain only the JSON document. Info/debug logs are also written to stdout, so raise
+        // the threshold to suppress them before anything is printed; warnings and errors still go to stderr.
+        if (options.getList() && options.getListJson()) {
+            Ln.initLogLevel(Ln.Level.WARN);
+        }
+
         Ln.i("Device: [" + Build.MANUFACTURER + "] " + Build.BRAND + " " + Build.MODEL + " (Android " + Build.VERSION.RELEASE + ")");
 
         if (options.getList()) {
@@ -249,21 +258,10 @@ public final class Server {
                 CleanUp.unlinkSelf();
             }
 
-            if (options.getListEncoders()) {
-                Ln.i(LogUtils.buildVideoEncoderListMessage());
-                Ln.i(LogUtils.buildAudioEncoderListMessage());
-            }
-            if (options.getListDisplays()) {
-                Ln.i(LogUtils.buildDisplayListMessage());
-            }
-            if (options.getListCameras() || options.getListCameraSizes()) {
-                Workarounds.apply();
-                Ln.i(LogUtils.buildCameraListMessage(options.getListCameraSizes()));
-            }
-            if (options.getListApps()) {
-                Workarounds.apply();
-                Ln.i("Processing Android apps... (this may take some time)");
-                Ln.i(LogUtils.buildAppListMessage());
+            if (options.getListJson()) {
+                listJson(options);
+            } else {
+                listText(options);
             }
             // Just print the requested data, do not mirror
             return;
@@ -274,6 +272,52 @@ public final class Server {
         } catch (ConfigurationException e) {
             // Do not print stack trace, a user-friendly error-message has already been logged
         }
+    }
+
+    private static void listText(Options options) {
+        if (options.getListEncoders()) {
+            Ln.i(LogUtils.buildVideoEncoderListMessage());
+            Ln.i(LogUtils.buildAudioEncoderListMessage());
+        }
+        if (options.getListDisplays()) {
+            Ln.i(LogUtils.buildDisplayListMessage());
+        }
+        if (options.getListCameras() || options.getListCameraSizes()) {
+            Workarounds.apply();
+            Ln.i(LogUtils.buildCameraListMessage(options.getListCameraSizes()));
+        }
+        if (options.getListApps()) {
+            Workarounds.apply();
+            Ln.i("Processing Android apps... (this may take some time)");
+            Ln.i(LogUtils.buildAppListMessage());
+        }
+    }
+
+    private static void listJson(Options options) {
+        // The standard output is kept JSON-only by the log-threshold change in internalMain() (info/debug logs are suppressed).
+        ListData data = new ListData();
+
+        if (options.getListDisplays()) {
+            data.setDisplays(LogUtils.getDisplayInfos());
+        }
+        if (options.getListCameras() || options.getListCameraSizes()) {
+            Workarounds.apply();
+            try {
+                data.setCameras(LogUtils.getCameraInfos(options.getListCameraSizes()));
+            } catch (CameraAccessException e) {
+                data.setCameras(new ArrayList<>());
+                data.setCamerasAccessDenied(true);
+            }
+        }
+        if (options.getListApps()) {
+            Workarounds.apply();
+            data.setApps(Device.listApps());
+        }
+        if (options.getListEncoders()) {
+            data.setEncoders(LogUtils.getEncoderInfos());
+        }
+
+        Ln.printRawOutput(ListJson.build(data, options.getListFilter()));
     }
 
     @SuppressWarnings("deprecation")

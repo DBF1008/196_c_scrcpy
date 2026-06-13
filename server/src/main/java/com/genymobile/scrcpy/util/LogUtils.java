@@ -4,6 +4,8 @@ import com.genymobile.scrcpy.AndroidVersions;
 import com.genymobile.scrcpy.audio.AudioCodec;
 import com.genymobile.scrcpy.device.Device;
 import com.genymobile.scrcpy.display.DisplayInfo;
+import com.genymobile.scrcpy.list.CameraInfo;
+import com.genymobile.scrcpy.list.EncoderInfo;
 import com.genymobile.scrcpy.model.Codec;
 import com.genymobile.scrcpy.model.DeviceApp;
 import com.genymobile.scrcpy.model.Size;
@@ -25,6 +27,7 @@ import android.os.Build;
 import android.util.Range;
 
 import java.text.DecimalFormat;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
@@ -295,5 +298,138 @@ public final class LogUtils {
         }
 
         return builder.toString();
+    }
+
+    // --- Structured (JSON) gatherers ---
+    // The methods below collect the same information as the text builders above, but as Android-free model objects so that filtering and
+    // JSON serialization can be performed (and unit-tested) by the com.genymobile.scrcpy.list package.
+
+    public static List<DisplayInfo> getDisplayInfos() {
+        List<DisplayInfo> result = new ArrayList<>();
+        DisplayManager displayManager = ServiceManager.getDisplayManager();
+        int[] displayIds = displayManager.getDisplayIds();
+        if (displayIds != null) {
+            for (int id : displayIds) {
+                DisplayInfo displayInfo = displayManager.getDisplayInfo(id);
+                if (displayInfo != null) {
+                    result.add(displayInfo);
+                } else {
+                    // Keep the display id even when its info is unavailable (null size is serialized as a null width/height)
+                    result.add(new DisplayInfo(id, null, 0, 0, 0, 0, null));
+                }
+            }
+        }
+        return result;
+    }
+
+    public static List<CameraInfo> getCameraInfos(boolean includeSizes) throws CameraAccessException {
+        List<CameraInfo> result = new ArrayList<>();
+        CameraManager cameraManager = ServiceManager.getCameraManager();
+        for (String id : cameraManager.getCameraIdList()) {
+            CameraCharacteristics characteristics = cameraManager.getCameraCharacteristics(id);
+
+            if (!isCameraBackwardCompatible(characteristics)) {
+                // Ignore depth cameras, as in buildCameraListMessage()
+                continue;
+            }
+
+            Integer facingValue = characteristics.get(CameraCharacteristics.LENS_FACING);
+            String facing = facingValue != null ? getCameraFacingName(facingValue) : "unknown";
+
+            int width = 0;
+            int height = 0;
+            Rect activeSize = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
+            if (activeSize != null) {
+                width = activeSize.width();
+                height = activeSize.height();
+            }
+
+            List<Integer> fps = null;
+            try {
+                Range<Integer>[] lowFpsRanges = characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES);
+                if (lowFpsRanges != null) {
+                    fps = getUniqueUpperValues(lowFpsRanges);
+                }
+            } catch (Exception e) {
+                Ln.w("Could not get available frame rates for camera " + id, e);
+            }
+
+            Float zoomMin = null;
+            Float zoomMax = null;
+            if (Build.VERSION.SDK_INT >= AndroidVersions.API_30_ANDROID_11) {
+                try {
+                    Range<Float> zoomRange = characteristics.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE);
+                    if (zoomRange != null) {
+                        zoomMin = zoomRange.getLower();
+                        zoomMax = zoomRange.getUpper();
+                    }
+                } catch (Exception e) {
+                    Ln.w("Could not get available zoom ranges for camera " + id, e);
+                }
+            }
+
+            List<Size> sizes = null;
+            List<CameraInfo.HighSpeed> highSpeed = null;
+            if (includeSizes) {
+                StreamConfigurationMap configs = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+                if (configs != null) {
+                    sizes = new ArrayList<>();
+                    android.util.Size[] outputSizes = configs.getOutputSizes(MediaCodec.class);
+                    if (outputSizes != null) {
+                        for (android.util.Size size : outputSizes) {
+                            sizes.add(new Size(size.getWidth(), size.getHeight()));
+                        }
+                    }
+
+                    android.util.Size[] highSpeedSizes = configs.getHighSpeedVideoSizes();
+                    if (highSpeedSizes != null && highSpeedSizes.length > 0) {
+                        highSpeed = new ArrayList<>();
+                        for (android.util.Size size : highSpeedSizes) {
+                            Range<Integer>[] highFpsRanges = configs.getHighSpeedVideoFpsRanges();
+                            List<Integer> highFps = getUniqueUpperValues(highFpsRanges);
+                            highSpeed.add(new CameraInfo.HighSpeed(new Size(size.getWidth(), size.getHeight()), highFps));
+                        }
+                    }
+                }
+            }
+
+            result.add(new CameraInfo(id, facing, width, height, fps, zoomMin, zoomMax, sizes, highSpeed));
+        }
+        return result;
+    }
+
+    private static List<Integer> getUniqueUpperValues(Range<Integer>[] ranges) {
+        SortedSet<Integer> set = new TreeSet<>();
+        for (Range<Integer> range : ranges) {
+            set.add(range.getUpper());
+        }
+        return new ArrayList<>(set);
+    }
+
+    public static List<EncoderInfo> getEncoderInfos() {
+        List<EncoderInfo> result = new ArrayList<>();
+        MediaCodecList codecList = new MediaCodecList(MediaCodecList.REGULAR_CODECS);
+        addEncoderInfos(result, codecList, EncoderInfo.TYPE_VIDEO, VideoCodec.values());
+        addEncoderInfos(result, codecList, EncoderInfo.TYPE_AUDIO, AudioCodec.values());
+        return result;
+    }
+
+    private static void addEncoderInfos(List<EncoderInfo> result, MediaCodecList codecList, String type, Codec[] codecs) {
+        for (Codec codec : codecs) {
+            MediaCodecInfo[] encoders = CodecUtils.getEncoders(codecList, codec.getMimeType());
+            for (MediaCodecInfo info : encoders) {
+                String hardwareType = null;
+                boolean vendor = false;
+                String aliasOf = null;
+                if (Build.VERSION.SDK_INT >= AndroidVersions.API_29_ANDROID_10) {
+                    hardwareType = getHwCodecType(info);
+                    vendor = info.isVendor();
+                    if (info.isAlias()) {
+                        aliasOf = info.getCanonicalName();
+                    }
+                }
+                result.add(new EncoderInfo(type, codec.getName(), info.getName(), hardwareType, vendor, aliasOf));
+            }
+        }
     }
 }

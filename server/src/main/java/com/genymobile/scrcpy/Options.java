@@ -3,6 +3,7 @@ package com.genymobile.scrcpy;
 import com.genymobile.scrcpy.audio.AudioCodec;
 import com.genymobile.scrcpy.audio.AudioSource;
 import com.genymobile.scrcpy.device.Device;
+import com.genymobile.scrcpy.list.ListFilter;
 import com.genymobile.scrcpy.model.CodecOption;
 import com.genymobile.scrcpy.model.NewDisplay;
 import com.genymobile.scrcpy.model.Orientation;
@@ -79,6 +80,15 @@ public class Options {
     private boolean listCameras;
     private boolean listCameraSizes;
     private boolean listApps;
+
+    // Output the requested list(s) as JSON instead of human-readable text
+    private boolean listJson;
+    // Optional filters for the listed resources (null = no filter)
+    private Boolean listAppSystem;
+    private String listCameraFacing;
+    private String listEncoderCodec;
+    private String listEncoderType;
+    private String listEncoderHw;
 
     // Options not used by the scrcpy client, but useful to use scrcpy-server directly
     private boolean sendDeviceMeta = true; // send device name and size
@@ -298,6 +308,14 @@ public class Options {
         return listApps;
     }
 
+    public boolean getListJson() {
+        return listJson;
+    }
+
+    public ListFilter getListFilter() {
+        return new ListFilter(listAppSystem, listCameraFacing, listEncoderCodec, listEncoderType, listEncoderHw);
+    }
+
     public boolean getSendDeviceMeta() {
         return sendDeviceMeta;
     }
@@ -478,6 +496,44 @@ public class Options {
                 case "list_apps":
                     options.listApps = Boolean.parseBoolean(value);
                     break;
+                case "list_format":
+                    options.listJson = parseListFormat(value);
+                    break;
+                case "list_app_system":
+                    options.listAppSystem = parseBooleanFilter("list_app_system", value);
+                    break;
+                case "list_camera_facing":
+                    if (!value.isEmpty()) {
+                        if (CameraFacing.findByName(value) == null) {
+                            throw new IllegalArgumentException("Camera facing " + value + " not supported");
+                        }
+                        options.listCameraFacing = value;
+                    }
+                    break;
+                case "list_encoder_codec":
+                    if (!value.isEmpty()) {
+                        if (VideoCodec.findByName(value) == null && AudioCodec.findByName(value) == null) {
+                            throw new IllegalArgumentException("Codec " + value + " not supported");
+                        }
+                        options.listEncoderCodec = value;
+                    }
+                    break;
+                case "list_encoder_type":
+                    if (!value.isEmpty()) {
+                        if (!"video".equals(value) && !"audio".equals(value)) {
+                            throw new IllegalArgumentException("Encoder type " + value + " not supported (expected video or audio)");
+                        }
+                        options.listEncoderType = value;
+                    }
+                    break;
+                case "list_encoder_hw":
+                    if (!value.isEmpty()) {
+                        if (!"sw".equals(value) && !"hw".equals(value) && !"hybrid".equals(value)) {
+                            throw new IllegalArgumentException("Encoder hardware type " + value + " not supported (expected sw, hw or hybrid)");
+                        }
+                        options.listEncoderHw = value;
+                    }
+                    break;
                 case "camera_id":
                     if (!value.isEmpty()) {
                         options.cameraId = value;
@@ -628,6 +684,28 @@ public class Options {
             return Float.parseFloat(value);
         } catch (NumberFormatException e) {
             throw new IllegalArgumentException("Invalid float value for " + key + ": \"" + value + "\"");
+        }
+    }
+
+    private static boolean parseListFormat(String value) {
+        switch (value) {
+            case "text":
+                return false;
+            case "json":
+                return true;
+            default:
+                throw new IllegalArgumentException("Invalid list format (expected text or json): \"" + value + "\"");
+        }
+    }
+
+    private static Boolean parseBooleanFilter(String key, String value) {
+        switch (value) {
+            case "true":
+                return Boolean.TRUE;
+            case "false":
+                return Boolean.FALSE;
+            default:
+                throw new IllegalArgumentException("Invalid value for " + key + " (expected true or false): \"" + value + "\"");
         }
     }
 

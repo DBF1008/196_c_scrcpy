@@ -71,6 +71,16 @@ public final class Ln {
         }
     }
 
+    /**
+     * Print a message to the standard output verbatim, without any prefix, log level or Android logger.
+     * <p>
+     * This is intended for machine-readable output (such as JSON), so that the standard output can be parsed directly.
+     */
+    public static void printRawOutput(String message) {
+        // Print in a single call so that the whole message is written atomically
+        CONSOLE_OUT.print(message + '\n');
+    }
+
     public static void w(String message, Throwable throwable) {
         if (isEnabled(Level.WARN)) {
             Log.w(TAG, message, throwable);
