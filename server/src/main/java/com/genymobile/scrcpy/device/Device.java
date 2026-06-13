@@ -120,6 +120,7 @@ public final class Device {
     public static boolean setClipboardText(String text) {
         ClipboardManager clipboardManager = ServiceManager.getClipboardManager();
         if (clipboardManager == null) {
+            Ln.w("Clipboard manager unavailable");
             return false;
         }
 

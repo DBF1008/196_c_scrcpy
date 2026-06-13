@@ -37,7 +37,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 public class Controller implements AsyncProcessor, VirtualDisplayListener {
@@ -67,6 +66,52 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         }
     }
 
+    /**
+     * Suppresses echoes from our own clipboard writes.
+     *
+     * On many Android devices, the {@code OnPrimaryClipChangedListener} fires asynchronously after
+     * {@code setPrimaryClip()} returns. This guard uses content-based deduplication combined with a
+     * time-bounded suppression window to correctly identify callbacks that originate from our own writes.
+     */
+    static final class ClipboardGuard {
+        private final Object lock = new Object();
+        private String lastSetText;
+        private String previousSetText;
+        private long suppressUntilNs;
+
+        /**
+         * Arm the guard before calling {@code setPrimaryClip()}.
+         */
+        void beginSet(String text) {
+            synchronized (lock) {
+                previousSetText = lastSetText;
+                lastSetText = text;
+                suppressUntilNs = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CLIPBOARD_SUPPRESS_WINDOW_MS);
+            }
+        }
+
+        /**
+         * Called from the {@code OnPrimaryClipChangedListener}.
+         *
+         * @return {@code true} if this callback should be suppressed (it echoes our own write)
+         */
+        boolean shouldSuppress(String callbackText) {
+            synchronized (lock) {
+                long now = System.nanoTime();
+                if (now > suppressUntilNs) {
+                    lastSetText = null;
+                    previousSetText = null;
+                    return false;
+                }
+                if (callbackText != null
+                        && (callbackText.equals(lastSetText) || callbackText.equals(previousSetText))) {
+                    return true;
+                }
+                return false;
+            }
+        }
+    }
+
     private static final int DEFAULT_DEVICE_ID = 0;
 
     // control_msg.h values of the pointerId field in inject_touch_event message
@@ -74,6 +119,9 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
 
     // Interval between simulated user activity events
     private static final long KEEP_ACTIVE_INTERVAL_MS = 4000;
+
+    // Time window to suppress clipboard change callbacks triggered by our own writes
+    private static final long CLIPBOARD_SUPPRESS_WINDOW_MS = 500;
 
     private static final ScheduledExecutorService EXECUTOR = Executors.newSingleThreadScheduledExecutor();
     private ExecutorService startAppExecutor;
@@ -95,7 +143,7 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
 
     private final KeyCharacterMap charMap = KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD);
 
-    private final AtomicBoolean isSettingClipboard = new AtomicBoolean();
+    private final ClipboardGuard clipboardGuard = new ClipboardGuard();
 
     private final AtomicReference<DisplayData> displayData = new AtomicReference<>();
     private final Object displayDataAvailable = new Object(); // condition variable
@@ -145,15 +193,17 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
             // If control and autosync are enabled, synchronize Android clipboard to the computer automatically
             if (clipboardManager != null) {
                 clipboardManager.addPrimaryClipChangedListener(() -> {
-                    if (isSettingClipboard.get()) {
-                        // This is a notification for the change we are currently applying, ignore it
+                    String text = Device.getClipboardText();
+                    if (text == null) {
                         return;
                     }
-                    String text = Device.getClipboardText();
-                    if (text != null) {
-                        DeviceMessage msg = DeviceMessage.createClipboard(text);
-                        sender.send(msg);
+                    if (clipboardGuard.shouldSuppress(text)) {
+                        // This notification was triggered by our own setPrimaryClip() call — ignore it
+                        Ln.d("Clipboard change suppressed (self-write echo)");
+                        return;
                     }
+                    DeviceMessage msg = DeviceMessage.createClipboard(text);
+                    sender.send(msg);
                 });
             } else {
                 Ln.w("No clipboard manager, copy-paste between device and computer will not work");
@@ -700,9 +750,9 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
     }
 
     private boolean setClipboard(String text, boolean paste, long sequence) {
-        isSettingClipboard.set(true);
+        // Arm the guard before any clipboard mutation so that async callbacks are suppressed
+        clipboardGuard.beginSet(text);
         boolean ok = Device.setClipboardText(text);
-        isSettingClipboard.set(false);
         if (ok) {
             Ln.i("Device clipboard set");
         }
