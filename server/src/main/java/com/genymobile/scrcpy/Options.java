@@ -80,6 +80,11 @@ public class Options {
     private boolean listCameraSizes;
     private boolean listApps;
 
+    private String listFormat = "text"; // "text" or "json"
+    private Boolean listSystemApps; // null = no filter, true = system only, false = user only
+    private String listCameraFacing; // null = no filter, "front"/"back"/"external"
+    private String listEncoderType; // null = no filter, "hw"/"sw"/"hybrid"
+
     // Options not used by the scrcpy client, but useful to use scrcpy-server directly
     private boolean sendDeviceMeta = true; // send device name and size
     private boolean sendFrameMeta = true; // send PTS so that the client may record properly
@@ -298,6 +303,22 @@ public class Options {
         return listApps;
     }
 
+    public String getListFormat() {
+        return listFormat;
+    }
+
+    public Boolean getListSystemApps() {
+        return listSystemApps;
+    }
+
+    public String getListCameraFacing() {
+        return listCameraFacing;
+    }
+
+    public String getListEncoderType() {
+        return listEncoderType;
+    }
+
     public boolean getSendDeviceMeta() {
         return sendDeviceMeta;
     }
@@ -477,6 +498,27 @@ public class Options {
                     break;
                 case "list_apps":
                     options.listApps = Boolean.parseBoolean(value);
+                    break;
+                case "list_format":
+                    if (!"text".equals(value) && !"json".equals(value)) {
+                        throw new IllegalArgumentException("Invalid list format: " + value + " (expected \"text\" or \"json\")");
+                    }
+                    options.listFormat = value;
+                    break;
+                case "list_system_apps":
+                    options.listSystemApps = Boolean.parseBoolean(value);
+                    break;
+                case "list_camera_facing":
+                    if (CameraFacing.findByName(value) == null) {
+                        throw new IllegalArgumentException("Invalid camera facing filter: " + value);
+                    }
+                    options.listCameraFacing = value;
+                    break;
+                case "list_encoder_type":
+                    if (!"hw".equals(value) && !"sw".equals(value) && !"hybrid".equals(value)) {
+                        throw new IllegalArgumentException("Invalid encoder type filter: " + value + " (expected \"hw\", \"sw\" or \"hybrid\")");
+                    }
+                    options.listEncoderType = value;
                     break;
                 case "camera_id":
                     if (!value.isEmpty()) {

@@ -103,6 +103,18 @@ public final class Ln {
         e(message, null);
     }
 
+    /**
+     * Print a message to stdout without any log prefix.
+     * <p>
+     * Used for structured output (e.g. JSON) that must not be prefixed with {@code [server] INFO:}.
+     *
+     * @param message the message to print
+     */
+    public static void rawPrintln(String message) {
+        CONSOLE_OUT.println(message);
+        CONSOLE_OUT.flush();
+    }
+
     static class NullOutputStream extends OutputStream {
         @Override
         public void write(byte[] b) {

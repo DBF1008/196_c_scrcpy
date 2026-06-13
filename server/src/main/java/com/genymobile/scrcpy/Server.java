@@ -12,10 +12,16 @@ import com.genymobile.scrcpy.control.Controller;
 import com.genymobile.scrcpy.device.DesktopConnection;
 import com.genymobile.scrcpy.device.Device;
 import com.genymobile.scrcpy.device.Streamer;
+import com.genymobile.scrcpy.model.CameraEntry;
 import com.genymobile.scrcpy.model.ConfigurationException;
+import com.genymobile.scrcpy.model.DeviceApp;
+import com.genymobile.scrcpy.model.DisplayEntry;
+import com.genymobile.scrcpy.model.EncoderEntry;
 import com.genymobile.scrcpy.model.NewDisplay;
 import com.genymobile.scrcpy.opengl.OpenGLRunner;
 import com.genymobile.scrcpy.util.Ln;
+import com.genymobile.scrcpy.util.ListFilter;
+import com.genymobile.scrcpy.util.ListOutputFormatter;
 import com.genymobile.scrcpy.util.LogUtils;
 import com.genymobile.scrcpy.video.CameraCapture;
 import com.genymobile.scrcpy.video.NewDisplayCapture;
@@ -25,6 +31,7 @@ import com.genymobile.scrcpy.video.SurfaceEncoder;
 import com.genymobile.scrcpy.video.VideoSource;
 
 import android.annotation.SuppressLint;
+import android.hardware.camera2.CameraAccessException;
 import android.os.Build;
 import android.os.Looper;
 import android.system.Os;
@@ -249,21 +256,62 @@ public final class Server {
                 CleanUp.unlinkSelf();
             }
 
-            if (options.getListEncoders()) {
-                Ln.i(LogUtils.buildVideoEncoderListMessage());
-                Ln.i(LogUtils.buildAudioEncoderListMessage());
-            }
+            ListFilter filter = ListFilter.fromOptions(options);
+            boolean json = "json".equals(options.getListFormat());
+
+            List<DisplayEntry> displays = null;
+            List<CameraEntry> cameras = null;
+            String cameraError = null;
+            List<DeviceApp> apps = null;
+            List<EncoderEntry> videoEncoders = null;
+            List<EncoderEntry> audioEncoders = null;
+
             if (options.getListDisplays()) {
-                Ln.i(LogUtils.buildDisplayListMessage());
+                displays = LogUtils.collectDisplays();
             }
             if (options.getListCameras() || options.getListCameraSizes()) {
                 Workarounds.apply();
-                Ln.i(LogUtils.buildCameraListMessage(options.getListCameraSizes()));
+                try {
+                    cameras = filter.filterCameras(LogUtils.collectCameras(options.getListCameraSizes()));
+                } catch (CameraAccessException e) {
+                    cameraError = "access denied";
+                }
             }
             if (options.getListApps()) {
                 Workarounds.apply();
-                Ln.i("Processing Android apps... (this may take some time)");
-                Ln.i(LogUtils.buildAppListMessage());
+                if (!json) {
+                    Ln.i("Processing Android apps... (this may take some time)");
+                }
+                apps = filter.filterApps(LogUtils.collectApps());
+            }
+            if (options.getListEncoders()) {
+                videoEncoders = filter.filterEncoders(LogUtils.collectVideoEncoders());
+                audioEncoders = filter.filterEncoders(LogUtils.collectAudioEncoders());
+            }
+
+            if (json) {
+                String output = ListOutputFormatter.formatJson(
+                        displays, cameras, options.getListCameraSizes(), cameraError,
+                        apps, videoEncoders, audioEncoders);
+                Ln.rawPrintln(output);
+            } else {
+                if (displays != null) {
+                    Ln.i(ListOutputFormatter.formatDisplaysText(displays));
+                }
+                if (cameraError != null) {
+                    Ln.i(ListOutputFormatter.formatCamerasText(null, options.getListCameraSizes(), true));
+                } else if (cameras != null) {
+                    Ln.i(ListOutputFormatter.formatCamerasText(cameras, options.getListCameraSizes()));
+                }
+                if (apps != null) {
+                    Ln.i(ListOutputFormatter.formatAppsText(apps));
+                }
+                if (videoEncoders != null) {
+                    Ln.i(ListOutputFormatter.formatVideoEncodersText(videoEncoders));
+                }
+                if (audioEncoders != null) {
+                    Ln.i(ListOutputFormatter.formatAudioEncodersText(audioEncoders));
+                }
             }
             // Just print the requested data, do not mirror
             return;

@@ -4,14 +4,15 @@ import com.genymobile.scrcpy.AndroidVersions;
 import com.genymobile.scrcpy.audio.AudioCodec;
 import com.genymobile.scrcpy.device.Device;
 import com.genymobile.scrcpy.display.DisplayInfo;
+import com.genymobile.scrcpy.model.CameraEntry;
 import com.genymobile.scrcpy.model.Codec;
 import com.genymobile.scrcpy.model.DeviceApp;
-import com.genymobile.scrcpy.model.Size;
+import com.genymobile.scrcpy.model.DisplayEntry;
+import com.genymobile.scrcpy.model.EncoderEntry;
 import com.genymobile.scrcpy.video.VideoCodec;
 import com.genymobile.scrcpy.wrappers.DisplayManager;
 import com.genymobile.scrcpy.wrappers.ServiceManager;
 
-import android.annotation.SuppressLint;
 import android.annotation.TargetApi;
 import android.graphics.Rect;
 import android.hardware.camera2.CameraAccessException;
@@ -24,10 +25,9 @@ import android.media.MediaCodecList;
 import android.os.Build;
 import android.util.Range;
 
-import java.text.DecimalFormat;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.Objects;
 import java.util.SortedSet;
 import java.util.TreeSet;
 
@@ -37,47 +37,191 @@ public final class LogUtils {
         // not instantiable
     }
 
-    private static String buildEncoderListMessage(String type, Codec[] codecs) {
-        StringBuilder builder = new StringBuilder("List of ").append(type).append(" encoders:");
+    // ===== Data collection methods (Android-dependent) =====
+
+    public static List<DisplayEntry> collectDisplays() {
+        List<DisplayEntry> displays = new ArrayList<>();
+        DisplayManager displayManager = ServiceManager.getDisplayManager();
+        int[] displayIds = displayManager.getDisplayIds();
+        if (displayIds != null) {
+            for (int id : displayIds) {
+                DisplayInfo displayInfo = displayManager.getDisplayInfo(id);
+                if (displayInfo != null && displayInfo.getSize() != null) {
+                    displays.add(new DisplayEntry(id, displayInfo.getSize().getWidth(), displayInfo.getSize().getHeight()));
+                } else {
+                    displays.add(new DisplayEntry(id, 0, 0));
+                }
+            }
+        }
+        return displays;
+    }
+
+    public static List<CameraEntry> collectCameras(boolean includeSizes) throws CameraAccessException {
+        List<CameraEntry> cameras = new ArrayList<>();
+        CameraManager cameraManager = ServiceManager.getCameraManager();
+        String[] cameraIds = cameraManager.getCameraIdList();
+        for (String id : cameraIds) {
+            CameraCharacteristics characteristics = cameraManager.getCameraCharacteristics(id);
+
+            if (!isCameraBackwardCompatible(characteristics)) {
+                // Ignore depth cameras as suggested by official documentation
+                // <https://developer.android.com/media/camera/camera2/camera-enumeration>
+                continue;
+            }
+
+            int facing = characteristics.get(CameraCharacteristics.LENS_FACING);
+            String facingName = getCameraFacingName(facing);
+
+            Rect activeSize = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
+            int sensorWidth = activeSize.width();
+            int sensorHeight = activeSize.height();
+
+            int[] fps = null;
+            try {
+                Range<Integer>[] lowFpsRanges = characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES);
+                if (lowFpsRanges != null) {
+                    SortedSet<Integer> set = new TreeSet<>();
+                    for (Range<Integer> range : lowFpsRanges) {
+                        set.add(range.getUpper());
+                    }
+                    fps = new int[set.size()];
+                    int i = 0;
+                    for (Integer val : set) {
+                        fps[i++] = val;
+                    }
+                }
+            } catch (Exception e) {
+                Ln.w("Could not get available frame rates for camera " + id, e);
+            }
+
+            float zoomMin = Float.NaN;
+            float zoomMax = Float.NaN;
+            if (Build.VERSION.SDK_INT >= AndroidVersions.API_30_ANDROID_11) {
+                try {
+                    Range<Float> zoomRange = characteristics.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE);
+                    if (zoomRange != null) {
+                        zoomMin = zoomRange.getLower();
+                        zoomMax = zoomRange.getUpper();
+                    }
+                } catch (Exception e) {
+                    Ln.w("Could not get available zoom ranges for camera " + id, e);
+                }
+            }
+
+            List<int[]> sizes = null;
+            List<int[]> highSpeedSizes = null;
+            List<int[]> highSpeedFps = null;
+
+            if (includeSizes) {
+                StreamConfigurationMap configs = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+
+                android.util.Size[] outputSizes = configs.getOutputSizes(MediaCodec.class);
+                if (outputSizes != null && outputSizes.length > 0) {
+                    sizes = new ArrayList<>();
+                    for (android.util.Size size : outputSizes) {
+                        sizes.add(new int[]{size.getWidth(), size.getHeight()});
+                    }
+                }
+
+                android.util.Size[] hsSizes = configs.getHighSpeedVideoSizes();
+                if (hsSizes != null && hsSizes.length > 0) {
+                    highSpeedSizes = new ArrayList<>();
+                    highSpeedFps = new ArrayList<>();
+                    Range<Integer>[] hsRanges = configs.getHighSpeedVideoFpsRanges();
+                    for (android.util.Size size : hsSizes) {
+                        highSpeedSizes.add(new int[]{size.getWidth(), size.getHeight()});
+                        if (hsRanges != null && hsRanges.length > 0) {
+                            SortedSet<Integer> set = new TreeSet<>();
+                            for (Range<Integer> range : hsRanges) {
+                                set.add(range.getUpper());
+                            }
+                            int[] fpsArr = new int[set.size()];
+                            int i = 0;
+                            for (Integer val : set) {
+                                fpsArr[i++] = val;
+                            }
+                            highSpeedFps.add(fpsArr);
+                        } else {
+                            highSpeedFps.add(new int[0]);
+                        }
+                    }
+                }
+            }
+
+            cameras.add(new CameraEntry(id, facingName, sensorWidth, sensorHeight, fps, zoomMin, zoomMax, sizes, highSpeedSizes, highSpeedFps));
+        }
+        return cameras;
+    }
+
+    public static List<DeviceApp> collectApps() {
+        return Device.listApps();
+    }
+
+    public static List<EncoderEntry> collectVideoEncoders() {
+        return collectEncoders("video", VideoCodec.values());
+    }
+
+    public static List<EncoderEntry> collectAudioEncoders() {
+        return collectEncoders("audio", AudioCodec.values());
+    }
+
+    private static List<EncoderEntry> collectEncoders(String type, Codec[] codecs) {
+        List<EncoderEntry> entries = new ArrayList<>();
         MediaCodecList codecList = new MediaCodecList(MediaCodecList.REGULAR_CODECS);
         for (Codec codec : codecs) {
             MediaCodecInfo[] encoders = CodecUtils.getEncoders(codecList, codec.getMimeType());
             for (MediaCodecInfo info : encoders) {
-                int lineStart = builder.length();
-                builder.append("\n    --").append(type).append("-codec=").append(codec.getName());
-                builder.append(" --").append(type).append("-encoder=").append(info.getName());
+                String hwType = null;
+                boolean vendor = false;
+                String aliasFor = null;
                 if (Build.VERSION.SDK_INT >= AndroidVersions.API_29_ANDROID_10) {
-                    int lineLength = builder.length() - lineStart;
-                    final int column = 70;
-                    if (lineLength < column) {
-                        int padding = column - lineLength;
-                        builder.append(String.format("%" + padding + "s", " "));
-                    }
-                    builder.append(" (").append(getHwCodecType(info)).append(')');
-                    if (info.isVendor()) {
-                        builder.append(" [vendor]");
-                    }
+                    hwType = getHwCodecType(info);
+                    vendor = info.isVendor();
                     if (info.isAlias()) {
-                        builder.append(" (alias for ").append(info.getCanonicalName()).append(')');
+                        aliasFor = info.getCanonicalName();
                     }
                 }
-
+                entries.add(new EncoderEntry(codec.getName(), info.getName(), hwType, vendor, aliasFor));
             }
         }
-
-        return builder.toString();
+        return entries;
     }
 
+    // ===== Legacy text methods (delegate to ListOutputFormatter) =====
+
     public static String buildVideoEncoderListMessage() {
-        return buildEncoderListMessage("video", VideoCodec.values());
+        return ListOutputFormatter.formatVideoEncodersText(collectVideoEncoders());
     }
 
     public static String buildAudioEncoderListMessage() {
-        return buildEncoderListMessage("audio", AudioCodec.values());
+        return ListOutputFormatter.formatAudioEncodersText(collectAudioEncoders());
     }
 
+    public static String buildDisplayListMessage() {
+        return ListOutputFormatter.formatDisplaysText(collectDisplays());
+    }
+
+    public static String buildCameraListMessage(boolean includeSizes) {
+        try {
+            List<CameraEntry> cameras = collectCameras(includeSizes);
+            return ListOutputFormatter.formatCamerasText(cameras, includeSizes);
+        } catch (CameraAccessException e) {
+            return ListOutputFormatter.formatCamerasText(Collections.emptyList(), includeSizes, true);
+        }
+    }
+
+    public static String buildAppListMessage() {
+        return ListOutputFormatter.formatAppsText(collectApps());
+    }
+
+    public static String buildAppListMessage(String title, List<DeviceApp> apps) {
+        return ListOutputFormatter.formatAppsText(title, apps);
+    }
+
+    // ===== Helpers =====
+
     @TargetApi(AndroidVersions.API_29_ANDROID_10)
-    private static String getHwCodecType(MediaCodecInfo info) {
+    static String getHwCodecType(MediaCodecInfo info) {
         if (info.isSoftwareOnly()) {
             return "sw";
         }
@@ -87,29 +231,7 @@ public final class LogUtils {
         return "hybrid";
     }
 
-    public static String buildDisplayListMessage() {
-        StringBuilder builder = new StringBuilder("List of displays:");
-        DisplayManager displayManager = ServiceManager.getDisplayManager();
-        int[] displayIds = displayManager.getDisplayIds();
-        if (displayIds == null || displayIds.length == 0) {
-            builder.append("\n    (none)");
-        } else {
-            for (int id : displayIds) {
-                builder.append("\n    --display-id=").append(id).append("    (");
-                DisplayInfo displayInfo = displayManager.getDisplayInfo(id);
-                if (displayInfo != null) {
-                    Size size = displayInfo.getSize();
-                    builder.append(size.getWidth()).append("x").append(size.getHeight());
-                } else {
-                    builder.append("size unknown");
-                }
-                builder.append(")");
-            }
-        }
-        return builder.toString();
-    }
-
-    private static String getCameraFacingName(int facing) {
+    static String getCameraFacingName(int facing) {
         switch (facing) {
             case CameraCharacteristics.LENS_FACING_FRONT:
                 return "front";
@@ -135,165 +257,5 @@ public final class LogUtils {
         }
 
         return false;
-    }
-
-    public static String buildCameraListMessage(boolean includeSizes) {
-        StringBuilder builder = new StringBuilder("List of cameras:");
-        CameraManager cameraManager = ServiceManager.getCameraManager();
-        try {
-            String[] cameraIds = cameraManager.getCameraIdList();
-            if (cameraIds.length == 0) {
-                builder.append("\n    (none)");
-            } else {
-                for (String id : cameraIds) {
-                    CameraCharacteristics characteristics = cameraManager.getCameraCharacteristics(id);
-
-                    if (!isCameraBackwardCompatible(characteristics)) {
-                        // Ignore depth cameras as suggested by official documentation
-                        // <https://developer.android.com/media/camera/camera2/camera-enumeration>
-                        continue;
-                    }
-
-                    builder.append("\n    --camera-id=").append(id);
-
-                    int facing = characteristics.get(CameraCharacteristics.LENS_FACING);
-                    builder.append("    (").append(getCameraFacingName(facing)).append(", ");
-
-                    Rect activeSize = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
-                    builder.append(activeSize.width()).append("x").append(activeSize.height());
-
-                    try {
-                        // Capture frame rates for low-FPS mode are the same for every resolution
-                        Range<Integer>[] lowFpsRanges = characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES);
-                        if (lowFpsRanges != null) {
-                            String uniqueLowFps = getFormattedUniqueSet(lowFpsRanges);
-                            builder.append(", fps=").append(uniqueLowFps);
-                        }
-                    } catch (Exception e) {
-                        // Some devices may provide invalid ranges, causing an IllegalArgumentException "lower must be less than or equal to upper"
-                        Ln.w("Could not get available frame rates for camera " + id, e);
-                    }
-
-                    if (Build.VERSION.SDK_INT >= AndroidVersions.API_30_ANDROID_11) {
-                        try {
-                            Range<Float> zoomRange = characteristics.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE);
-                            if (zoomRange != null) {
-                                String zoom = getFormattedZoomRange(zoomRange);
-                                builder.append(", zoom-range=").append(zoom);
-                            }
-                        } catch (Exception e) {
-                            Ln.w("Could not get available zoom ranges for camera " + id, e);
-                        }
-                    }
-
-                    builder.append(')');
-
-                    if (includeSizes) {
-                        StreamConfigurationMap configs = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
-
-                        android.util.Size[] sizes = configs.getOutputSizes(MediaCodec.class);
-                        if (sizes == null || sizes.length == 0) {
-                            builder.append("\n        (none)");
-                        } else {
-                            for (android.util.Size size : sizes) {
-                                builder.append("\n        - ").append(size.getWidth()).append('x').append(size.getHeight());
-                            }
-                        }
-
-                        android.util.Size[] highSpeedSizes = configs.getHighSpeedVideoSizes();
-                        if (highSpeedSizes != null && highSpeedSizes.length > 0) {
-                            builder.append("\n      High speed capture (--camera-high-speed):");
-                            for (android.util.Size size : highSpeedSizes) {
-                                Range<Integer>[] highFpsRanges = configs.getHighSpeedVideoFpsRanges();
-                                String uniqueHighFps = getFormattedUniqueSet(highFpsRanges);
-                                builder.append("\n        - ").append(size.getWidth()).append("x").append(size.getHeight());
-                                builder.append(" (fps=").append(uniqueHighFps).append(')');
-                            }
-                        }
-                    }
-                }
-            }
-        } catch (CameraAccessException e) {
-            builder.append("\n    (access denied)");
-        }
-        return builder.toString();
-    }
-
-    private static String getFormattedUniqueSet(Range<Integer>[] ranges) {
-        SortedSet<Integer> set = new TreeSet<>();
-        for (Range<Integer> range : ranges) {
-            set.add(range.getUpper());
-        }
-
-        StringBuilder builder = new StringBuilder("{");
-        boolean first = true;
-        for (Integer i : set) {
-            if (!first) {
-                builder.append(", ");
-            } else {
-                first = false;
-            }
-            builder.append(i);
-        }
-        builder.append("}");
-
-        return builder.toString();
-    }
-
-    private static String getFormattedZoomRange(Range<Float> range) {
-        DecimalFormat format = new DecimalFormat("#.##");
-        return "[" + format.format(range.getLower()) + ", " + format.format(range.getUpper()) + "]";
-    }
-
-    public static String buildAppListMessage() {
-        List<DeviceApp> apps = Device.listApps();
-        return buildAppListMessage("List of apps:", apps);
-    }
-
-    @SuppressLint("QueryPermissionsNeeded")
-    public static String buildAppListMessage(String title, List<DeviceApp> apps) {
-        StringBuilder builder = new StringBuilder(title);
-
-        // Sort by:
-        //  1. system flag (system apps are before non-system apps)
-        //  2. name
-        //  3. package name
-        // Comparator.comparing() was introduced in API 24, so it cannot be used here to simplify the code
-        Collections.sort(apps, (thisApp, otherApp) -> {
-            // System apps first
-            int cmp = -Boolean.compare(thisApp.isSystem(), otherApp.isSystem());
-            if (cmp != 0) {
-                return cmp;
-            }
-
-            cmp = Objects.compare(thisApp.getName(), otherApp.getName(), String::compareTo);
-            if (cmp != 0) {
-                return cmp;
-            }
-
-            return Objects.compare(thisApp.getPackageName(), otherApp.getPackageName(), String::compareTo);
-        });
-
-        final int column = 30;
-        for (DeviceApp app : apps) {
-            String name = app.getName();
-            int padding = column - name.length();
-            builder.append("\n ");
-            if (app.isSystem()) {
-                builder.append("* ");
-            } else {
-                builder.append("- ");
-
-            }
-            builder.append(name);
-            if (padding > 0) {
-                builder.append(String.format("%" + padding + "s", " "));
-            } else {
-                builder.append("\n   ").append(String.format("%" + column + "s", " "));
-            }
-            builder.append(" ").append(app.getPackageName());
-        }
-
-        return builder.toString();
     }
 }
